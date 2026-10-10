@@ -8,6 +8,8 @@ Run:  streamlit run app.py
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -60,6 +62,25 @@ def fmt_value(metric: str, v) -> str:
     if metric in ("spend", "revenue"):
         return f"{v:,.2f}"
     return f"{v:,.0f}"
+
+
+EVAL_DIR = C.ROOT / "reports" / "evaluation"
+
+
+@st.cache_data(show_spinner=False)
+def load_evaluation_report():
+    """Read the saved outputs of `python -m scripts.run_evaluation`. Returns
+    None if the report hasn't been generated yet; this tab never runs the
+    evaluation itself, it only displays what was last saved to disk."""
+    needed = ["synthetic_metrics.json", "ps04_metrics.json", "alert_fatigue_comparison.csv",
+              "synthetic_incident_results.csv"]
+    if not all((EVAL_DIR / f).exists() for f in needed):
+        return None
+    syn = json.loads((EVAL_DIR / "synthetic_metrics.json").read_text())
+    ps04 = json.loads((EVAL_DIR / "ps04_metrics.json").read_text())
+    fatigue_cmp = pd.read_csv(EVAL_DIR / "alert_fatigue_comparison.csv")
+    incidents = pd.read_csv(EVAL_DIR / "synthetic_incident_results.csv")
+    return syn, ps04, fatigue_cmp, incidents
 
 
 def download(df: pd.DataFrame, name: str, label: str = "Download CSV"):
@@ -154,7 +175,7 @@ if m_view.empty:
     st.stop()
 
 tabs = st.tabs(["Overview", "Campaign explorer", "Anomalies", "Alert routing",
-                "Alert fatigue", "About & limitations"])
+                "Alert fatigue", "Evaluation", "About & limitations"])
 
 # ------------------------------------------------------------ overview ----
 with tabs[0]:
@@ -369,8 +390,63 @@ with tabs[4]:
         show_table(det[["date", "metric", "severity", "route", "notification", "evidence_score",
                         "explanation"]], height=220)
 
-# --------------------------------------------------------------- about ----
+# ----------------------------------------------------------- evaluation ----
 with tabs[5]:
+    report = load_evaluation_report()
+    if report is None:
+        st.info("No saved evaluation report yet. Generate one with:\n\n"
+                "```\npython -m scripts.run_evaluation\n```\n\n"
+                "This writes `reports/evaluation/` and this tab reads it from there — "
+                "it never re-runs the evaluation itself.")
+    else:
+        syn, ps04, fatigue_cmp, incidents = report
+        rl = syn["record_level"]
+        inc_level = syn["incident_level"]
+
+        st.markdown("#### 🔬 Synthetic benchmark — *designed scenarios, not real incidents*")
+        st.caption(
+            "Precision/recall/F1 and detection rate are measured **only** on this labelled "
+            "synthetic benchmark's held-out EVAL split, and only over metrics a label targets "
+            "(spend, conversions, ctr). They say nothing about real-world accuracy.")
+        c = st.columns(5)
+        c[0].metric("Precision", f"{rl['precision']*100:.0f}%" if rl["precision"] == rl["precision"] else "n/a")
+        c[1].metric("Recall", f"{rl['recall']*100:.0f}%" if rl["recall"] == rl["recall"] else "n/a")
+        c[2].metric("F1", f"{rl['f1']:.2f}" if rl["f1"] == rl["f1"] else "n/a")
+        c[3].metric("Incident detection rate",
+                    f"{inc_level['detection_rate_eval']*100:.0f}%",
+                    help="Share of EVAL-split incidents with >=1 flagged record on the mapped "
+                         "metric inside their window (Alert or Human Review both count).")
+        c[4].metric("Median detection delay",
+                    f"{inc_level['median_delay_days_eval']:.0f} d" if inc_level['median_delay_days_eval'] == inc_level['median_delay_days_eval'] else "n/a",
+                    help="Days from an incident's documented start to its first flag.")
+        st.caption(f"TP={rl['tp']} · FP={rl['fp']} · FN={rl['fn']} · TN={rl['tn']} "
+                   f"(evaluated on {rl['n_evaluated']} campaign-day-metric records, "
+                   f"{rl['n_unmapped_metric_flags']} unmapped-metric flags excluded from scoring)")
+
+        show_table(incidents[["incident_id", "campaign_id", "incident_type", "mapped_metric",
+                              "severity", "period", "detected", "delay_days"]], height=240)
+
+        st.divider()
+        st.markdown("#### 🚨 Alert fatigue — synthetic vs **official PS-04 dataset**")
+        st.caption(
+            "Volume behaviour only (no accuracy claim for PS-04, which has no ground-truth "
+            "labels). Shows how many raw per-day flags collapse into actual notifications.")
+        disp = fatigue_cmp.copy()
+        disp["notification_reduction_pct"] = disp["notification_reduction_pct"].map(
+            lambda v: f"{v:.0f}%" if pd.notna(v) else "n/a")
+        show_table(disp[["dataset", "raw_flagged_records", "notifications_sent",
+                         "suppressed_repeats", "notification_reduction_pct"]], height=160)
+        fig = px.bar(fatigue_cmp, x="dataset", y=["raw_flagged_records", "notifications_sent"],
+                     barmode="group", title="Raw flags vs notifications sent, by dataset")
+        fig.update_layout(height=300, margin=dict(t=50, b=10), xaxis_title=None, yaxis_title="records")
+        st.plotly_chart(fig, **FULL)
+
+        st.caption(
+            "Full metric definitions, assumptions and limitations: `reports/evaluation/report.md` "
+            "(regenerate with `python -m scripts.run_evaluation`).")
+
+# --------------------------------------------------------------- about ----
+with tabs[6]:
     st.markdown(f"""
 **What Adomaly does on this dataset**
 - Builds a campaign-specific baseline for each metric (spend, impressions, clicks, conversions, revenue,
