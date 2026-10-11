@@ -1,0 +1,4 @@
+dataset,system,system_label,raw_flagged_records,notifications_sent,suppressed_repeats,notification_reduction_pct,status,note
+"PS-04 (official, no labels)",fixed_threshold,Fixed threshold (day-over-day),853,853,0,0.0,ok,threshold 90% chosen on synthetic DEV
+"PS-04 (official, no labels)",adaptive_detector,Adaptive detector (every flag notified),364,364,0,0.0,ok,
+"PS-04 (official, no labels)",full_adomaly,Full Adomaly (routing + episodes),364,219,145,39.83516483516483,ok,

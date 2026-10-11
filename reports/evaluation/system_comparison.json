@@ -1,0 +1,246 @@
+{
+  "note": "Synthetic benchmark, EVAL split only. Designed scenarios, not real-world performance. Evidence scores are heuristic, not probabilities.",
+  "fixed_threshold": {
+    "rule": "flag if |value(t) / value(t-1) - 1| >= threshold",
+    "selected_threshold": 0.9,
+    "selection": "max record-level F1 on DEV only; ties -> largest threshold",
+    "grid": [
+      {
+        "threshold": 0.2,
+        "tp": 17,
+        "fp": 1058,
+        "fn": 21,
+        "tn": 2954,
+        "precision": 0.01581395348837209,
+        "recall": 0.4473684210526316,
+        "f1": 0.030548068283917335,
+        "n_flagged_all_metrics": 2336
+      },
+      {
+        "threshold": 0.3,
+        "tp": 11,
+        "fp": 562,
+        "fn": 27,
+        "tn": 3450,
+        "precision": 0.019197207678883072,
+        "recall": 0.2894736842105263,
+        "f1": 0.036006546644844525,
+        "n_flagged_all_metrics": 1202
+      },
+      {
+        "threshold": 0.4,
+        "tp": 7,
+        "fp": 358,
+        "fn": 31,
+        "tn": 3654,
+        "precision": 0.019178082191780823,
+        "recall": 0.18421052631578946,
+        "f1": 0.034739454094292806,
+        "n_flagged_all_metrics": 711
+      },
+      {
+        "threshold": 0.5,
+        "tp": 5,
+        "fp": 246,
+        "fn": 33,
+        "tn": 3766,
+        "precision": 0.0199203187250996,
+        "recall": 0.13157894736842105,
+        "f1": 0.03460207612456747,
+        "n_flagged_all_metrics": 458
+      },
+      {
+        "threshold": 0.6,
+        "tp": 4,
+        "fp": 166,
+        "fn": 34,
+        "tn": 3846,
+        "precision": 0.023529411764705882,
+        "recall": 0.10526315789473684,
+        "f1": 0.03846153846153846,
+        "n_flagged_all_metrics": 306
+      },
+      {
+        "threshold": 0.7,
+        "tp": 3,
+        "fp": 114,
+        "fn": 35,
+        "tn": 3898,
+        "precision": 0.02564102564102564,
+        "recall": 0.07894736842105263,
+        "f1": 0.03870967741935484,
+        "n_flagged_all_metrics": 219
+      },
+      {
+        "threshold": 0.8,
+        "tp": 3,
+        "fp": 90,
+        "fn": 35,
+        "tn": 3922,
+        "precision": 0.03225806451612903,
+        "recall": 0.07894736842105263,
+        "f1": 0.04580152671755725,
+        "n_flagged_all_metrics": 162
+      },
+      {
+        "threshold": 0.9,
+        "tp": 3,
+        "fp": 69,
+        "fn": 35,
+        "tn": 3943,
+        "precision": 0.041666666666666664,
+        "recall": 0.07894736842105263,
+        "f1": 0.05454545454545455,
+        "n_flagged_all_metrics": 120
+      }
+    ]
+  },
+  "systems": [
+    {
+      "system": "fixed_threshold",
+      "system_label": "Fixed threshold (day-over-day)",
+      "period": "eval",
+      "precision": 0.060240963855421686,
+      "recall": 0.06172839506172839,
+      "f1": 0.06097560975609756,
+      "false_positive_rate": 0.019652305366591082,
+      "tp": 5,
+      "fp": 78,
+      "fn": 76,
+      "tn": 3891,
+      "n_incidents": 8,
+      "incidents_detected": 4,
+      "incidents_notified": 4,
+      "incidents_detected_not_notified": 0,
+      "incidents_missed": 4,
+      "incidents_reaching_human_via_review_only": 0,
+      "incidents_with_multiple_notifications": 1,
+      "notifications_in_incident_windows": 5,
+      "incident_detection_rate": 0.5,
+      "notification_coverage_rate": 0.5,
+      "median_detection_delay_days": 0.0,
+      "median_notification_delay_days": 0.0,
+      "raw_flagged_records": 147,
+      "notifications_sent": 147,
+      "suppressed_repeats": 0,
+      "notification_reduction_pct": 0.0,
+      "notifications_on_labelled_metrics": 83,
+      "true_incident_notifications": 5,
+      "false_notifications": 78,
+      "notification_precision": 0.060240963855421686,
+      "benign_shift_flagged_records": 0
+    },
+    {
+      "system": "adaptive_detector",
+      "system_label": "Adaptive detector (every flag notified)",
+      "period": "eval",
+      "precision": 0.4772727272727273,
+      "recall": 0.25925925925925924,
+      "f1": 0.33599999999999997,
+      "false_positive_rate": 0.005794910556815319,
+      "tp": 21,
+      "fp": 23,
+      "fn": 60,
+      "tn": 3946,
+      "n_incidents": 8,
+      "incidents_detected": 8,
+      "incidents_notified": 8,
+      "incidents_detected_not_notified": 0,
+      "incidents_missed": 0,
+      "incidents_reaching_human_via_review_only": 0,
+      "incidents_with_multiple_notifications": 4,
+      "notifications_in_incident_windows": 21,
+      "incident_detection_rate": 1.0,
+      "notification_coverage_rate": 1.0,
+      "median_detection_delay_days": 0.0,
+      "median_notification_delay_days": 0.0,
+      "raw_flagged_records": 80,
+      "notifications_sent": 80,
+      "suppressed_repeats": 0,
+      "notification_reduction_pct": 0.0,
+      "notifications_on_labelled_metrics": 44,
+      "true_incident_notifications": 21,
+      "false_notifications": 23,
+      "notification_precision": 0.4772727272727273,
+      "benign_shift_flagged_records": 0
+    },
+    {
+      "system": "full_adomaly",
+      "system_label": "Full Adomaly (routing + episodes)",
+      "period": "eval",
+      "precision": 0.4772727272727273,
+      "recall": 0.25925925925925924,
+      "f1": 0.33599999999999997,
+      "false_positive_rate": 0.005794910556815319,
+      "tp": 21,
+      "fp": 23,
+      "fn": 60,
+      "tn": 3946,
+      "n_incidents": 8,
+      "incidents_detected": 8,
+      "incidents_notified": 8,
+      "incidents_detected_not_notified": 0,
+      "incidents_missed": 0,
+      "incidents_reaching_human_via_review_only": 2,
+      "incidents_with_multiple_notifications": 1,
+      "notifications_in_incident_windows": 9,
+      "incident_detection_rate": 1.0,
+      "notification_coverage_rate": 1.0,
+      "median_detection_delay_days": 0.0,
+      "median_notification_delay_days": 0.0,
+      "raw_flagged_records": 80,
+      "notifications_sent": 53,
+      "suppressed_repeats": 27,
+      "notification_reduction_pct": 33.75,
+      "notifications_on_labelled_metrics": 26,
+      "true_incident_notifications": 9,
+      "false_notifications": 17,
+      "notification_precision": 0.34615384615384615,
+      "benign_shift_flagged_records": 0
+    }
+  ],
+  "route_precision_eval": {
+    "fixed_threshold": {
+      "Alert": {
+        "flags": 83,
+        "tp": 5,
+        "fp": 78,
+        "precision": 0.060240963855421686
+      },
+      "Human Review": {
+        "flags": 0,
+        "tp": 0,
+        "fp": 0,
+        "precision": NaN
+      }
+    },
+    "adaptive_detector": {
+      "Alert": {
+        "flags": 44,
+        "tp": 21,
+        "fp": 23,
+        "precision": 0.4772727272727273
+      },
+      "Human Review": {
+        "flags": 0,
+        "tp": 0,
+        "fp": 0,
+        "precision": NaN
+      }
+    },
+    "full_adomaly": {
+      "Alert": {
+        "flags": 28,
+        "tp": 19,
+        "fp": 9,
+        "precision": 0.6785714285714286
+      },
+      "Human Review": {
+        "flags": 16,
+        "tp": 2,
+        "fp": 14,
+        "precision": 0.125
+      }
+    }
+  }
+}

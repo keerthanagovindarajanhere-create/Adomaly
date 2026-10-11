@@ -13,6 +13,7 @@ import json
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from src import config as C
@@ -44,9 +45,16 @@ div[data-testid="stMetricValue"]{font-size:1.5rem}
 
 
 # ---------------------------------------------------------------- data ----
+# Cache keys include file modification time + size, so replacing the dataset or
+# re-running the evaluation script invalidates the cache without a restart.
 @st.cache_data(show_spinner="Loading PS-04 dataset...")
-def load_data(path: str):
+def load_data(path: str, file_sig: tuple):
     return load_ps04_metrics(path)
+
+
+def file_signature(path) -> tuple:
+    s = path.stat()  # raises FileNotFoundError if missing; handled by the caller
+    return (s.st_mtime_ns, s.st_size)
 
 
 @st.cache_data(show_spinner="Running Adomaly detection pipeline...")
@@ -65,13 +73,31 @@ def fmt_value(metric: str, v) -> str:
 
 
 EVAL_DIR = C.ROOT / "reports" / "evaluation"
+COMPARISON_FILES = ["system_comparison.csv", "system_comparison.json",
+                    "incident_notification_coverage.csv", "route_precision.csv",
+                    "synthetic_incident_replay.csv", "ps04_notification_burden.csv"]
+SYSTEM_ORDER = ["fixed_threshold", "adaptive_detector", "full_adomaly"]
+SYSTEM_SHORT = {"fixed_threshold": "Fixed threshold", "adaptive_detector": "Adaptive detector",
+                "full_adomaly": "Full Adomaly"}
+STATUS_COLORS = {"notified": "#2f9e6b", "detected_not_notified": "#e0a030", "missed": "#d64545"}
+
+
+def report_signature() -> tuple:
+    """(name, mtime_ns, size) of every file in reports/evaluation/. Passed to the
+    cached loaders so a re-run of the evaluation script is picked up on the
+    next rerun instead of serving a stale report."""
+    if not EVAL_DIR.is_dir():
+        return ()
+    return tuple(sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size)
+                        for p in EVAL_DIR.iterdir() if p.is_file()))
 
 
 @st.cache_data(show_spinner=False)
-def load_evaluation_report():
+def load_evaluation_report(signature: tuple):
     """Read the saved outputs of `python -m scripts.run_evaluation`. Returns
     None if the report hasn't been generated yet; this tab never runs the
-    evaluation itself, it only displays what was last saved to disk."""
+    evaluation itself, it only displays what was last saved to disk.
+    `signature` is only a cache key (see report_signature)."""
     needed = ["synthetic_metrics.json", "ps04_metrics.json", "alert_fatigue_comparison.csv",
               "synthetic_incident_results.csv"]
     if not all((EVAL_DIR / f).exists() for f in needed):
@@ -81,6 +107,30 @@ def load_evaluation_report():
     fatigue_cmp = pd.read_csv(EVAL_DIR / "alert_fatigue_comparison.csv")
     incidents = pd.read_csv(EVAL_DIR / "synthetic_incident_results.csv")
     return syn, ps04, fatigue_cmp, incidents
+
+
+@st.cache_data(show_spinner=False)
+def load_comparison_report(signature: tuple):
+    """Round-2 comparison outputs. None if the report predates them."""
+    if not all((EVAL_DIR / f).exists() for f in COMPARISON_FILES):
+        return None
+    meta = json.loads((EVAL_DIR / "system_comparison.json").read_text())
+    replay = pd.read_csv(EVAL_DIR / "synthetic_incident_replay.csv",
+                         parse_dates=["date", "incident_start", "incident_end"])
+    cov = pd.read_csv(EVAL_DIR / "incident_notification_coverage.csv",
+                      parse_dates=["start_date", "end_date"])
+    return {
+        "comparison": pd.read_csv(EVAL_DIR / "system_comparison.csv"),
+        "threshold": meta["fixed_threshold"]["selected_threshold"],
+        "coverage": cov,
+        "route_precision": pd.read_csv(EVAL_DIR / "route_precision.csv"),
+        "replay": replay,
+        "ps04_burden": pd.read_csv(EVAL_DIR / "ps04_notification_burden.csv"),
+    }
+
+
+def pct_str(v, nd=0) -> str:
+    return "n/a" if pd.isna(v) else f"{v * 100:.{nd}f}%"
 
 
 def download(df: pd.DataFrame, name: str, label: str = "Download CSV"):
@@ -107,7 +157,7 @@ def show_table(df: pd.DataFrame, height: int = 380):
 
 
 try:
-    metrics, metadata = load_data(str(C.PS04_FILE))
+    metrics, metadata = load_data(str(C.PS04_FILE), file_signature(C.PS04_FILE))
 except FileNotFoundError:
     st.error(f"Dataset not found at `{C.PS04_FILE.relative_to(C.ROOT)}`. "
              "Place the organizer-supplied `daily_campaign_metrics.csv` there and reload.")
@@ -392,58 +442,265 @@ with tabs[4]:
 
 # ----------------------------------------------------------- evaluation ----
 with tabs[5]:
-    report = load_evaluation_report()
-    if report is None:
-        st.info("No saved evaluation report yet. Generate one with:\n\n"
-                "```\npython -m scripts.run_evaluation\n```\n\n"
-                "This writes `reports/evaluation/` and this tab reads it from there — "
-                "it never re-runs the evaluation itself.")
+    sig = report_signature()
+    cmp_report = load_comparison_report(sig)
+    sub = st.tabs(["Benchmark summary", "System comparison", "Incident coverage",
+                   "Route precision", "Incident replay"])
+
+    # ---- original evaluation view, unchanged ----
+    with sub[0]:
+        report = load_evaluation_report(sig)
+        if report is None:
+            st.info("No saved evaluation report yet. Generate one with:\n\n"
+                    "```\npython -m scripts.run_evaluation\n```\n\n"
+                    "This writes `reports/evaluation/` and this tab reads it from there — "
+                    "it never re-runs the evaluation itself.")
+        else:
+            syn, ps04, fatigue_cmp, incidents = report
+            rl = syn["record_level"]
+            inc_level = syn["incident_level"]
+
+            st.markdown("#### 🔬 Synthetic benchmark — *designed scenarios, not real incidents*")
+            st.caption(
+                "Precision/recall/F1 and detection rate are measured **only** on this labelled "
+                "synthetic benchmark's held-out EVAL split, and only over metrics a label targets "
+                "(spend, conversions, ctr). They say nothing about real-world accuracy.")
+            c = st.columns(5)
+            c[0].metric("Precision", f"{rl['precision']*100:.0f}%" if rl["precision"] == rl["precision"] else "n/a")
+            c[1].metric("Recall", f"{rl['recall']*100:.0f}%" if rl["recall"] == rl["recall"] else "n/a")
+            c[2].metric("F1", f"{rl['f1']:.2f}" if rl["f1"] == rl["f1"] else "n/a")
+            c[3].metric("Incident detection rate",
+                        f"{inc_level['detection_rate_eval']*100:.0f}%",
+                        help="Share of EVAL-split incidents with >=1 flagged record on the mapped "
+                             "metric inside their window (Alert or Human Review both count).")
+            c[4].metric("Median detection delay",
+                        f"{inc_level['median_delay_days_eval']:.0f} d" if inc_level['median_delay_days_eval'] == inc_level['median_delay_days_eval'] else "n/a",
+                        help="Days from an incident's documented start to its first flag.")
+            st.caption(f"TP={rl['tp']} · FP={rl['fp']} · FN={rl['fn']} · TN={rl['tn']} "
+                       f"(evaluated on {rl['n_evaluated']} campaign-day-metric records, "
+                       f"{rl['n_unmapped_metric_flags']} unmapped-metric flags excluded from scoring)")
+
+            show_table(incidents[["incident_id", "campaign_id", "incident_type", "mapped_metric",
+                                  "severity", "period", "detected", "delay_days"]], height=240)
+
+            st.divider()
+            st.markdown("#### 🚨 Alert fatigue — synthetic vs **official PS-04 dataset**")
+            st.caption(
+                "Volume behaviour only (no accuracy claim for PS-04, which has no ground-truth "
+                "labels). Shows how many raw per-day flags collapse into actual notifications.")
+            disp = fatigue_cmp.copy()
+            disp["notification_reduction_pct"] = disp["notification_reduction_pct"].map(
+                lambda v: f"{v:.0f}%" if pd.notna(v) else "n/a")
+            show_table(disp[["dataset", "raw_flagged_records", "notifications_sent",
+                             "suppressed_repeats", "notification_reduction_pct"]], height=160)
+            fig = px.bar(fatigue_cmp, x="dataset", y=["raw_flagged_records", "notifications_sent"],
+                         barmode="group", title="Raw flags vs notifications sent, by dataset")
+            fig.update_layout(height=300, margin=dict(t=50, b=10), xaxis_title=None, yaxis_title="records")
+            st.plotly_chart(fig, **FULL)
+
+            st.caption(
+                "Full metric definitions, assumptions and limitations: `reports/evaluation/report.md` "
+                "(regenerate with `python -m scripts.run_evaluation`).")
+
+    if cmp_report is None:
+        for t in sub[1:]:
+            with t:
+                st.info("No comparison report yet. Regenerate with:\n\n"
+                        "```\npython -m scripts.run_evaluation\n```")
     else:
-        syn, ps04, fatigue_cmp, incidents = report
-        rl = syn["record_level"]
-        inc_level = syn["incident_level"]
+        comp = cmp_report["comparison"].copy()
+        comp["order"] = comp["system"].map({k: i for i, k in enumerate(SYSTEM_ORDER)})
+        comp = comp.sort_values("order")
+        comp["System"] = comp["system"].map(SYSTEM_SHORT)
+        th = cmp_report["threshold"]
+        SYN_NOTE = ("🔬 Synthetic benchmark, held-out EVAL split. Designed scenarios with "
+                    "known labels — **not** real-world performance.")
 
-        st.markdown("#### 🔬 Synthetic benchmark — *designed scenarios, not real incidents*")
-        st.caption(
-            "Precision/recall/F1 and detection rate are measured **only** on this labelled "
-            "synthetic benchmark's held-out EVAL split, and only over metrics a label targets "
-            "(spend, conversions, ctr). They say nothing about real-world accuracy.")
-        c = st.columns(5)
-        c[0].metric("Precision", f"{rl['precision']*100:.0f}%" if rl["precision"] == rl["precision"] else "n/a")
-        c[1].metric("Recall", f"{rl['recall']*100:.0f}%" if rl["recall"] == rl["recall"] else "n/a")
-        c[2].metric("F1", f"{rl['f1']:.2f}" if rl["f1"] == rl["f1"] else "n/a")
-        c[3].metric("Incident detection rate",
-                    f"{inc_level['detection_rate_eval']*100:.0f}%",
-                    help="Share of EVAL-split incidents with >=1 flagged record on the mapped "
-                         "metric inside their window (Alert or Human Review both count).")
-        c[4].metric("Median detection delay",
-                    f"{inc_level['median_delay_days_eval']:.0f} d" if inc_level['median_delay_days_eval'] == inc_level['median_delay_days_eval'] else "n/a",
-                    help="Days from an incident's documented start to its first flag.")
-        st.caption(f"TP={rl['tp']} · FP={rl['fp']} · FN={rl['fn']} · TN={rl['tn']} "
-                   f"(evaluated on {rl['n_evaluated']} campaign-day-metric records, "
-                   f"{rl['n_unmapped_metric_flags']} unmapped-metric flags excluded from scoring)")
+        # ---- system comparison ----
+        with sub[1]:
+            st.caption(SYN_NOTE)
+            st.markdown(
+                f"- **Fixed threshold**: flag when a metric moves ≥ **{th:.0%}** vs the previous day "
+                "(threshold picked on DEV only). Every flag notifies.\n"
+                "- **Adaptive detector**: Adomaly's campaign-specific flags, every flag notifies.\n"
+                "- **Full Adomaly**: same flags + evidence routing + episode grouping + escalation.")
+            show = comp[["System", "precision", "recall", "f1", "false_positive_rate",
+                         "incidents_detected", "incidents_notified", "incidents_missed",
+                         "n_incidents", "median_notification_delay_days",
+                         "raw_flagged_records", "notifications_sent",
+                         "notification_reduction_pct", "false_notifications"]].copy()
+            show["notification_reduction_pct"] = show["notification_reduction_pct"] / 100
+            st.dataframe(show, **FULL, hide_index=True, column_config={
+                "precision": st.column_config.NumberColumn("Precision", format="percent"),
+                "recall": st.column_config.NumberColumn("Recall", format="percent"),
+                "f1": st.column_config.NumberColumn("F1", format="%.3f"),
+                "false_positive_rate": st.column_config.NumberColumn("FPR", format="percent"),
+                "incidents_detected": "Incidents detected",
+                "incidents_notified": "Incidents notified",
+                "incidents_missed": "Missed",
+                "n_incidents": "EVAL incidents",
+                "median_notification_delay_days": st.column_config.NumberColumn(
+                    "Median notify delay (d)", format="%.1f"),
+                "raw_flagged_records": "Raw flags",
+                "notifications_sent": "Notifications",
+                "notification_reduction_pct": st.column_config.NumberColumn(
+                    "Reduction vs raw", format="percent"),
+                "false_notifications": "False notifications",
+            })
+            st.caption("Precision / recall / F1 / FPR: record level over spend, conversions and CTR "
+                       "(the metrics labels target). Notification burden: all scored metrics in the "
+                       "EVAL split. An incident is *notified* only if a new or escalation "
+                       "notification lands on its metric inside its window.")
+            left, right = st.columns(2)
+            burden = comp.melt(id_vars="System", value_vars=["raw_flagged_records", "notifications_sent"],
+                               var_name="measure", value_name="count")
+            burden["measure"] = burden["measure"].map(
+                {"raw_flagged_records": "Raw flags", "notifications_sent": "Notifications sent"})
+            fig = px.bar(burden, x="System", y="count", color="measure", barmode="group", text="count",
+                         title="Notification burden (synthetic EVAL)")
+            fig.update_layout(height=340, margin=dict(t=50, b=10), xaxis_title=None, legend_title=None)
+            left.plotly_chart(fig, **FULL)
+            q = comp.melt(id_vars="System", value_vars=["precision", "recall", "f1"],
+                          var_name="measure", value_name="value")
+            fig = px.bar(q, x="System", y="value", color="measure", barmode="group",
+                         title="Record-level quality (synthetic EVAL)")
+            fig.update_layout(height=340, margin=dict(t=50, b=10), xaxis_title=None,
+                              yaxis_range=[0, 1], legend_title=None)
+            right.plotly_chart(fig, **FULL)
+            download(cmp_report["comparison"], "adomaly_system_comparison.csv")
 
-        show_table(incidents[["incident_id", "campaign_id", "incident_type", "mapped_metric",
-                              "severity", "period", "detected", "delay_days"]], height=240)
+            st.divider()
+            st.markdown("#### 📊 PS-04 official dataset — notification volume only")
+            st.caption("PS-04 has **no ground-truth labels**: these are counts of what each system "
+                       "would send, not accuracy. Kept separate from the synthetic results above.")
+            pb = cmp_report["ps04_burden"].copy()
+            pb["System"] = pb["system"].map(SYSTEM_SHORT)
+            pb["notification_reduction_pct"] = pb["notification_reduction_pct"] / 100
+            st.dataframe(pb[["System", "raw_flagged_records", "notifications_sent",
+                             "notification_reduction_pct", "status", "note"]],
+                         **FULL, hide_index=True, column_config={
+                             "raw_flagged_records": "Raw flags",
+                             "notifications_sent": "Notifications",
+                             "notification_reduction_pct": st.column_config.NumberColumn(
+                                 "Reduction vs raw", format="percent")})
 
-        st.divider()
-        st.markdown("#### 🚨 Alert fatigue — synthetic vs **official PS-04 dataset**")
-        st.caption(
-            "Volume behaviour only (no accuracy claim for PS-04, which has no ground-truth "
-            "labels). Shows how many raw per-day flags collapse into actual notifications.")
-        disp = fatigue_cmp.copy()
-        disp["notification_reduction_pct"] = disp["notification_reduction_pct"].map(
-            lambda v: f"{v:.0f}%" if pd.notna(v) else "n/a")
-        show_table(disp[["dataset", "raw_flagged_records", "notifications_sent",
-                         "suppressed_repeats", "notification_reduction_pct"]], height=160)
-        fig = px.bar(fatigue_cmp, x="dataset", y=["raw_flagged_records", "notifications_sent"],
-                     barmode="group", title="Raw flags vs notifications sent, by dataset")
-        fig.update_layout(height=300, margin=dict(t=50, b=10), xaxis_title=None, yaxis_title="records")
-        st.plotly_chart(fig, **FULL)
+        # ---- incident notification coverage ----
+        with sub[2]:
+            st.caption(SYN_NOTE)
+            cov = cmp_report["coverage"].copy()
+            cov["System"] = cov["system"].map(SYSTEM_SHORT)
+            cnt = cov.groupby(["System", "status"]).size().reset_index(name="incidents")
+            fig = px.bar(cnt, x="System", y="incidents", color="status", text="incidents",
+                         category_orders={"System": [SYSTEM_SHORT[k] for k in SYSTEM_ORDER],
+                                          "status": list(STATUS_COLORS)},
+                         color_discrete_map=STATUS_COLORS,
+                         title="Did a human get notified about each EVAL incident?")
+            fig.update_layout(height=340, margin=dict(t=50, b=10), xaxis_title=None)
+            st.plotly_chart(fig, **FULL)
+            st.caption("**detected_not_notified** = flagged inside the window, but every flag was "
+                       "suppressed as a repeat of an episode that started earlier. That is the "
+                       "cost side of suppression and is shown, not hidden.")
+            wide = cov.pivot_table(index=["incident_id", "incident_type", "mapped_metric", "severity"],
+                                   columns="System", values="status", aggfunc="first").reset_index()
+            st.dataframe(wide, **FULL, hide_index=True, height=300)
+            full_cov = cov[cov["system"] == "full_adomaly"]
+            st.markdown("**Full Adomaly detail**")
+            show_table(full_cov[["incident_id", "campaign_id", "incident_type", "mapped_metric",
+                                 "status", "flags_in_window", "notifications_in_window",
+                                 "suppressed_in_window", "episode_started_before_window",
+                                 "review_only", "notification_delay_days"]], height=280)
+            download(cov.drop(columns="System"), "adomaly_incident_coverage.csv")
 
-        st.caption(
-            "Full metric definitions, assumptions and limitations: `reports/evaluation/report.md` "
-            "(regenerate with `python -m scripts.run_evaluation`).")
+        # ---- route precision ----
+        with sub[3]:
+            st.caption(SYN_NOTE)
+            rp = cmp_report["route_precision"].copy()
+            rp_full = rp[rp["system"] == "full_adomaly"]
+            c = st.columns(max(len(rp_full), 1) + 1)
+            for i, r in enumerate(rp_full.itertuples()):
+                c[i].metric(f"{r.route} precision", pct_str(r.precision),
+                            help=f"{r.tp} of {r.flags} flags inside a labelled incident window")
+            allf = rp[rp["system"] == "adaptive_detector"]
+            if not allf.empty:
+                c[-1].metric("All flags (no routing)", pct_str(allf["precision"].iloc[0]),
+                             help="Same flags, before evidence routing splits them")
+            st.caption("If routing works, Alert precision should sit above Human Review precision. "
+                       "Evidence strength is a heuristic ranking score, not a probability.")
+            rp["System"] = rp["system"].map(SYSTEM_SHORT)
+            st.dataframe(rp[["System", "route", "flags", "tp", "fp", "precision"]], **FULL,
+                         hide_index=True, column_config={
+                             "precision": st.column_config.NumberColumn("Precision", format="percent")})
+
+        # ---- synthetic incident replay ----
+        with sub[4]:
+            st.caption(SYN_NOTE + " Day-by-day replay of one incident: what each system "
+                       "would have sent.")
+            rep = cmp_report["replay"]
+            if rep.empty:
+                st.info("No EVAL incidents in the replay file.")
+            else:
+                inc_meta = rep.drop_duplicates("incident_id")[
+                    ["incident_id", "campaign_id", "incident_type", "metric", "incident_severity"]]
+                iid = st.selectbox(
+                    "Incident", inc_meta["incident_id"],
+                    format_func=lambda i: " · ".join(
+                        str(v) for v in inc_meta.set_index("incident_id").loc[i, [
+                            "campaign_id", "incident_type", "metric", "incident_severity"]]) + f"  ({i})")
+                d = rep[rep["incident_id"] == iid].sort_values("date")
+                m = d["metric"].iloc[0]
+                s0, s1 = d["incident_start"].iloc[0], d["incident_end"].iloc[0]
+
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32],
+                                    vertical_spacing=0.06)
+                fig.add_trace(go.Scatter(x=d["date"], y=d["observed"], name="Observed",
+                                         mode="lines+markers", marker=dict(size=4)), row=1, col=1)
+                if "baseline" in d:
+                    fig.add_trace(go.Scatter(x=d["date"], y=d["baseline"], name="Expected (baseline)",
+                                             mode="lines", line=dict(dash="dot")), row=1, col=1)
+                fig.add_vrect(x0=s0 - pd.Timedelta(hours=12), x1=s1 + pd.Timedelta(hours=12),
+                              fillcolor="#d64545", opacity=0.08, line_width=0,
+                              annotation_text="labelled incident window",
+                              annotation_position="top left")
+
+                lanes = []
+                fx = d[d["fixed_notification"] == "new"]
+                lanes.append((fx, "Fixed threshold", "notification", "#6b8fd6", "circle"))
+                ad = d[d["route"].isin([ALERT, REVIEW])]
+                lanes.append((ad, "Adaptive detector", "notification", "#8a6bd6", "circle"))
+                for note, sym, col in (("new", "star", "#d64545"), ("escalation", "triangle-up", "#d64545"),
+                                       ("suppressed", "x-thin-open", "#9aa5b1")):
+                    fa = d[(d["route"].isin([ALERT, REVIEW])) & (d["notification"] == note)]
+                    lanes.append((fa, "Full Adomaly", note, col, sym))
+                for frame, lane, note, col, sym in lanes:
+                    if frame.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=frame["date"], y=[lane] * len(frame), mode="markers",
+                        name=f"{lane}: {note}" if lane == "Full Adomaly" else f"{lane}: notification",
+                        marker=dict(symbol=sym, size=12, color=col, line=dict(width=1.5, color=col)),
+                        showlegend=lane == "Full Adomaly" or note == "notification"),
+                        row=2, col=1)
+                fig.update_yaxes(categoryorder="array",
+                                 categoryarray=["Full Adomaly", "Adaptive detector", "Fixed threshold"],
+                                 row=2, col=1)
+                if m in ("ctr", "cvr"):
+                    fig.update_yaxes(tickformat=".2%", row=1, col=1)
+                fig.update_layout(height=520, margin=dict(t=30, b=10), title=LABEL.get(m, m),
+                                  legend=dict(orientation="h", y=-0.12))
+                st.plotly_chart(fig, **FULL)
+
+                c = st.columns(3)
+                c[0].metric("Fixed threshold sends", int((d["fixed_notification"] == "new").sum()))
+                c[1].metric("Adaptive detector sends", int(d["route"].isin([ALERT, REVIEW]).sum()))
+                c[2].metric("Full Adomaly sends",
+                            int(d["notification"].isin(["new", "escalation"]).sum()),
+                            help="new + escalation; suppressed repeats are not sent")
+                st.caption(f"Window shown: incident ± 7 days ({len(d)} days). Counts include flags "
+                           "just outside the labelled window.")
+                cols = [c_ for c_ in ["date", "in_incident_window", "observed", "baseline", "z",
+                                      "evidence_score", "route", "notification", "episode_id",
+                                      "fixed_route", "fixed_pct_change", "explanation"] if c_ in d]
+                show_table(d[cols], height=300)
 
 # --------------------------------------------------------------- about ----
 with tabs[6]:

@@ -1,0 +1,5 @@
+system,system_label,route,flags,tp,fp,precision
+fixed_threshold,Fixed threshold (day-over-day),Alert,83,5,78,0.060240963855421686
+adaptive_detector,Adaptive detector (every flag notified),Alert,44,21,23,0.4772727272727273
+full_adomaly,Full Adomaly (routing + episodes),Alert,28,19,9,0.6785714285714286
+full_adomaly,Full Adomaly (routing + episodes),Human Review,16,2,14,0.125

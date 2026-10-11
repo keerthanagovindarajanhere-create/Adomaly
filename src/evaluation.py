@@ -210,3 +210,168 @@ def alert_fatigue_summary(records: pd.DataFrame, episodes: pd.DataFrame) -> dict
         "suppressed_repeats": n_sup,
         "notification_reduction_pct": ((raw - sent) / raw * 100.0) if raw else float("nan"),
     }
+
+
+# ===================================================================
+# Round-2 additions: notification-level coverage and system comparison.
+# Everything below is additive; the functions above are unchanged.
+# ===================================================================
+NOTIFYING = ("new", "escalation")
+
+
+def notify_every_flag(records: pd.DataFrame) -> pd.DataFrame:
+    """The "adaptive detector, every flag notified" comparison system.
+
+    Same detector, same flagged records as full Adomaly, but with no
+    evidence routing (every flag is an Alert) and no episode grouping
+    (every flag is its own "new" notification). Unflagged records are
+    untouched. Used to isolate what routing + episodes add.
+    """
+    df = records.copy()
+    flagged = df["route"].isin(FLAGGED_ROUTES)
+    df.loc[flagged, "route"] = ALERT
+    df["notification"] = np.where(flagged, "new", "")
+    if "episode_id" in df.columns:
+        df["episode_id"] = pd.NA
+    return df
+
+
+def notification_coverage(records: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
+    """One row per labelled incident: did a human actually get NOTIFIED?
+
+    Credit rule: an incident is `notified` only if at least one record on its
+    mapped metric, same campaign, with date inside [start_date, end_date], has
+    notification "new" or "escalation". Flags that were suppressed do not count.
+
+    status:
+      notified               -- >= 1 new/escalation notification in window
+      detected_not_notified  -- flagged in window, but every flag suppressed
+      missed                 -- no flag in window at all
+
+    Also reports notifications_in_window (fragmentation: >1 means the same
+    incident notified more than once), suppressed_in_window,
+    episode_started_before_window (an in-window flag belongs to an episode
+    whose first flag predates the window -- the case where suppression can
+    hide an incident), and review_only (detected, but every in-window flag
+    was Human Review -- an Alert-only policy would not have surfaced it).
+    """
+    has_ep = "episode_id" in records.columns
+    flagged_all = records[records["route"].isin(FLAGGED_ROUTES)]
+    rows = []
+    for inc in labels.itertuples():
+        metric = METRIC_MAP.get(inc.affected_metric)
+        same = flagged_all[(flagged_all["campaign_id"] == inc.campaign_id)
+                           & (flagged_all["metric"] == metric)]
+        win = same[same["date"].between(inc.start_date, inc.end_date)]
+        notes = win[win["notification"].isin(NOTIFYING)]
+        n_flags, n_notes = len(win), len(notes)
+        status = "notified" if n_notes else ("detected_not_notified" if n_flags else "missed")
+
+        started_before = False
+        if has_ep and n_flags:
+            eps = win["episode_id"].dropna().unique()
+            if len(eps):
+                first = same[same["episode_id"].isin(eps)].groupby("episode_id")["date"].min()
+                started_before = bool((first < inc.start_date).any())
+
+        first_flag = win["date"].min() if n_flags else pd.NaT
+        first_note = notes["date"].min() if n_notes else pd.NaT
+        rows.append({
+            "incident_id": inc.incident_id, "campaign_id": inc.campaign_id,
+            "incident_type": inc.incident_type, "mapped_metric": metric,
+            "severity": inc.severity, "period": inc.period,
+            "start_date": inc.start_date, "end_date": inc.end_date,
+            "status": status, "detected": n_flags > 0, "notified": n_notes > 0,
+            "flags_in_window": n_flags, "notifications_in_window": n_notes,
+            "suppressed_in_window": int((win["notification"] == "suppressed").sum()),
+            "episode_started_before_window": started_before,
+            "review_only": bool(n_flags and (win["route"] == REVIEW).all()),
+            "first_flag_date": first_flag, "first_notification_date": first_note,
+            "detection_delay_days": (first_flag - inc.start_date).days if n_flags else np.nan,
+            "notification_delay_days": (first_note - inc.start_date).days if n_notes else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def route_precision(labelled: pd.DataFrame) -> dict:
+    """Precision of flags by route, over the labelled universe (MAPPED_METRICS).
+    `labelled` should already be filtered to the split being evaluated.
+    Shows whether evidence-based routing separates stronger from weaker cases."""
+    u = labelled[labelled["metric"].isin(MAPPED_METRICS)]
+    out = {}
+    for route in FLAGGED_ROUTES:
+        f = u[u["route"] == route]
+        tp = int(f["is_incident_positive"].sum())
+        out[route] = {"flags": int(len(f)), "tp": tp, "fp": int(len(f) - tp),
+                      "precision": tp / len(f) if len(f) else float("nan")}
+    return out
+
+
+def notification_burden(records: pd.DataFrame) -> dict:
+    """Dataset-agnostic volume over ALL scored metrics (works for PS-04).
+    No labels involved, so no accuracy claim."""
+    flagged = records[records["route"].isin(FLAGGED_ROUTES)]
+    raw = int(len(flagged))
+    sent = int(flagged["notification"].isin(NOTIFYING).sum())
+    return {"raw_flagged_records": raw, "notifications_sent": sent,
+            "suppressed_repeats": int((flagged["notification"] == "suppressed").sum()),
+            "notification_reduction_pct": ((raw - sent) / raw * 100.0) if raw else float("nan")}
+
+
+def system_metrics(name: str, records: pd.DataFrame, labels: pd.DataFrame,
+                   benign: pd.DataFrame, period: str = "eval") -> dict:
+    """All comparison measures for one system on one split (synthetic only).
+
+    - precision / recall / F1 / FPR: record level over MAPPED_METRICS
+      (record_level_metrics), FPR = FP / (FP + TN).
+    - incident detection and notification coverage: notification_coverage,
+      restricted to incidents of this split.
+    - notification burden: ALL detector metrics in this split (records whose
+      `period` == period), so it measures what an operator would receive.
+    - notification_precision: share of notifications on MAPPED_METRICS that
+      fall inside a labelled incident window.
+    """
+    recs = records[records["period"] == period]
+    labelled = label_records(recs, labels, benign)
+    rl = record_level_metrics(labelled)
+    # Coverage uses ALL records so an episode that began before this split is
+    # still recognised; only this split's incidents are scored.
+    cov = notification_coverage(records, labels[labels["period"] == period])
+    burden = notification_burden(recs)
+    fa = false_alerts_on_benign(labelled)
+
+    mapped_notes = labelled[labelled["metric"].isin(MAPPED_METRICS)
+                            & labelled["route"].isin(FLAGGED_ROUTES)
+                            & labelled["notification"].isin(NOTIFYING)]
+    n_inc = len(cov)
+    det = cov["detected"].sum() if n_inc else 0
+    notified = cov["notified"].sum() if n_inc else 0
+    nan = float("nan")
+    return {
+        "system": name, "period": period,
+        "precision": rl.precision, "recall": rl.recall, "f1": rl.f1,
+        "false_positive_rate": rl.fp / (rl.fp + rl.tn) if (rl.fp + rl.tn) else nan,
+        "tp": rl.tp, "fp": rl.fp, "fn": rl.fn, "tn": rl.tn,
+        "n_incidents": int(n_inc),
+        "incidents_detected": int(det),
+        "incidents_notified": int(notified),
+        "incidents_detected_not_notified": int((cov["status"] == "detected_not_notified").sum()) if n_inc else 0,
+        "incidents_missed": int((cov["status"] == "missed").sum()) if n_inc else 0,
+        "incidents_reaching_human_via_review_only": int(cov["review_only"].sum()) if n_inc else 0,
+        "incidents_with_multiple_notifications": int((cov["notifications_in_window"] > 1).sum()) if n_inc else 0,
+        "notifications_in_incident_windows": int(cov["notifications_in_window"].sum()) if n_inc else 0,
+        "incident_detection_rate": det / n_inc if n_inc else nan,
+        "notification_coverage_rate": notified / n_inc if n_inc else nan,
+        "median_detection_delay_days": float(cov["detection_delay_days"].median()) if det else nan,
+        "median_notification_delay_days": float(cov["notification_delay_days"].median()) if notified else nan,
+        **burden,
+        # Counts behind notification_precision. Suppression removes repeat
+        # in-incident days as well as repeat false days, so the ratio alone
+        # can fall even when false notifications fall; report both counts.
+        "notifications_on_labelled_metrics": int(len(mapped_notes)),
+        "true_incident_notifications": int(mapped_notes["is_incident_positive"].sum()),
+        "false_notifications": int((~mapped_notes["is_incident_positive"].astype(bool)).sum()),
+        "notification_precision": (mapped_notes["is_incident_positive"].mean()
+                                   if len(mapped_notes) else nan),
+        "benign_shift_flagged_records": fa["benign_shift_flagged_records"],
+    }
